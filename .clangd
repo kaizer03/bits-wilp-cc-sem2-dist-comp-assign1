@@ -1,0 +1,5 @@
+CompileFlags:
+  Add:
+    - "-I."
+    - "-Itest"
+    - "-std=c11"
