@@ -34,13 +34,16 @@
    - [Recovery Timeout](#recovery-timeout)
 9. [File Distribution Use Cases](#file-distribution-use-cases)
 10. [Test Data Setup](#test-data-setup)
-11. [Code Walkthrough](#code-walkthrough)
+11. [Unit Testing](#unit-testing)
+    - [Running the Tests](#running-the-tests)
+    - [Test Suites](#test-suites)
+12. [Code Walkthrough](#code-walkthrough)
     - [Shared Protocol Primitives](#shared-protocol-primitives)
     - [server2.c — Replica File Server](#server2c--replica-file-server)
     - [server1.c — Primary File Server / Orchestrator](#server1c--primary-file-server--orchestrator)
     - [client.c — Interactive Terminal Application](#clientc--interactive-terminal-application)
-12. [Platform Support](#platform-support)
-13. [Runtime Terminal Walkthrough](#runtime-terminal-walkthrough)
+13. [Platform Support](#platform-support)
+14. [Runtime Terminal Walkthrough](#runtime-terminal-walkthrough)
 
 ---
 
@@ -153,6 +156,10 @@ bits-wilp-cc-sem2-dist-comp-assign1/
 ├── server2.c                  ← Replica server source
 ├── Makefile
 ├── README.md
+├── CONTRIBUTIONS.md
+├── .clangd                    ← clangd include-path config (IDE support)
+├── .vscode/
+│   └── c_cpp_properties.json  ← VS Code / Cursor C/C++ IntelliSense config
 ├── bin/                       ← Compiled binaries (created by make)
 │   ├── client
 │   ├── server1
@@ -162,10 +169,25 @@ bits-wilp-cc-sem2-dist-comp-assign1/
 │   ├── a.txt
 │   ├── b.txt
 │   └── test.txt
-└── server2_files/             ← Server 2's file storage
-    ├── a.txt
-    ├── b.txt
-    └── (other files...)
+├── server2_files/             ← Server 2's file storage
+│   ├── a.txt
+│   ├── b.txt
+│   └── (other files...)
+└── test/                      ← Unity unit test suite
+    ├── unity.c                ← Unity framework source
+    ├── unity.h
+    ├── unity_internals.h
+    ├── compile_flags.txt      ← clangd flags for test files
+    ├── test_pathsanitize.c
+    ├── test_sanitize_name.c
+    ├── test_cancel_token.c
+    ├── test_buffers_equal.c
+    ├── test_server_status_code.c
+    ├── test_file_identical.c
+    ├── test_server_ready.c
+    ├── test_recv_length_guard.c
+    ├── test_file_size_guard.c
+    └── test_target_label.c
 ```
 
 ---
@@ -183,7 +205,10 @@ make server2
 make server1
 make client
 
-# Clean all compiled binaries
+# Build and run all unit tests
+make test
+
+# Clean all compiled binaries and test binaries
 make clean
 
 # Build + run the interactive client (also creates client_files/ directory)
@@ -906,6 +931,53 @@ A filename that exists in neither directory covers Case 5.
 
 ---
 
+## Unit Testing
+
+The project ships with a Unity-based unit test suite that covers all pure-logic functions and guards across all three source files. Unity is a lightweight, single-file C testing framework with no external dependencies.
+
+### Running the Tests
+
+```bash
+make test
+```
+
+This compiles each test suite into its own binary in `bin/`, runs them all sequentially, and prints a grand total at the end:
+
+```
+──────────────────────────────────────────
+  Running: test_pathsanitize
+──────────────────────────────────────────
+test/test_pathsanitize.c:64:test_traversal_blocked:PASS
+...
+══════════════════════════════════════════
+  GRAND TOTAL
+══════════════════════════════════════════
+  60 Tests  0 Failures  0 Ignored
+  ALL TESTS PASSED
+══════════════════════════════════════════
+```
+
+### Test Suites
+
+| File | Function Under Test | Tests |
+|---|---|---|
+| `test_pathsanitize.c` | `build_fullpath()` — path traversal and safety | 4 |
+| `test_sanitize_name.c` | `sanitize_name()` — client filename sanitisation | 3 |
+| `test_cancel_token.c` | `is_cancel()` — escape token detection | 4 |
+| `test_buffers_equal.c` | `buffers_equal()` — byte-level file content comparison | 4 |
+| `test_server_status_code.c` | `server_status_code()` — S1/S2 boolean → status code mapping | 4 |
+| `test_file_identical.c` | `file_is_identical_in_list()` — cross-server identical file detection | 6 |
+| `test_server_ready.c` | `!need \|\| up` — server polling readiness guard | 4 |
+| `test_recv_length_guard.c` | `recv_string` length validation — wire protocol safety | 6 |
+| `test_file_size_guard.c` | `read_file_to_buf` size guard — `off_t` → `uint32_t` overflow check | 5 |
+| `test_target_label.c` | Target enum → label ternary chains in client + server1 | 10 |
+
+All test files are self-contained — each file copies the function under test directly rather than including a whole source file, avoiding `main()` conflicts and keeping compilation times negligible.
+
+Runtime integration testing (all menu paths, all file distribution scenarios, all three recovery scenarios, and all edge cases) has been completed manually on macOS (iTerm2).
+
+---
+
 ## Code Walkthrough
 
 ### Shared Protocol Primitives
@@ -1022,8 +1094,10 @@ On macOS/Linux, instead of embedding shell commands directly in `osascript` or t
 
 Scripts are given unique names per server (`_s1`, `_s2`) so that two concurrent launches cannot overwrite each other, which was an earlier bug that caused both terminals to start the same server.
 
-#### Server Health Check (`check_server_status`)
+#### Server Health Check (`check_server_status` / `server_status_code`)
 Sends `OP_PING` to Server 1. Server 1 replies with `[uint32: 1][uint32: s2_status]` — the client's only legitimate channel to learn Server 2's status. When Server 1 is unreachable, `s2` is set to `0` (unknown) and the recovery logic handles the phased recovery.
+
+The raw boolean pair is converted to a single integer status code by `server_status_code(s1, s2)`: `3` = both online, `1` = S1 online only, `0` = S1 offline. This function is extracted as a named helper so it can be independently unit-tested.
 
 #### Auto-Recovery (`ensure_servers_up` / `recover_one_server`)
 `ensure_servers_up(context)` is called before every server request in every command function. It uses `recover_one_server(server_num, need_s1, need_s2)` as a shared helper to avoid code duplication across the three recovery branches (S1 down, S2 down, both down). See the [Server Auto-Recovery](#server-auto-recovery--all-scenarios) section for full scenario details.
@@ -1035,6 +1109,9 @@ Polls `check_server_status()` every `POLL_INTERVAL` seconds (3 s) for up to `POL
 - `read_line` reads a full line of input, stripping the trailing newline.
 - `read_choice` reads a single character and discards the rest of the line.
 - `is_cancel(str)` returns true if `str` equals the `CANCEL_TOKEN` (`"!cancel"`).
+
+#### Identical File Detection (`file_is_identical_in_list`)
+Used by the `d. List Files` display layer to annotate files that exist on both servers with the same name and size as `(identical)`. Extracted as a named helper — `file_is_identical_in_list(src, idx, other, count)` — so it can be unit-tested independently of the display code.
 
 #### Path Sanitisation (`sanitize_name`)
 Before writing received files to disk, the output filename is sanitised: `/`, `\`, and `..` sequences are replaced with underscores. This prevents a malicious server from causing the client to write outside `client_files/`.
