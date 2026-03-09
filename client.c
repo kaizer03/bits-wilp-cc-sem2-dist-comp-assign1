@@ -351,7 +351,8 @@ typedef enum {
     TERM_XTERM,
     TERM_WINDOWS_CMD,
     TERM_WINDOWS_POWERSHELL,
-    TERM_WSL
+    TERM_WSL,
+    TERM_HEADLESS   /* no display server — run servers as background processes */
 } TermType;
 
 /* ---- Global terminal type (set once in main, used by auto-recovery everywhere) ---- */
@@ -366,6 +367,30 @@ static TermType detect_terminal(void) {
     if (term_prog) return TERM_WINDOWS_POWERSHELL;
     return TERM_WINDOWS_CMD;
 #else
+#if PLATFORM_LINUX
+    /*
+     * Headless detection FIRST — before checking $TERM or $TERM_PROGRAM.
+     *
+     * $TERM (e.g. "xterm-256color") describes the SSH client's terminal
+     * emulation capabilities, NOT whether a local display server is running.
+     * On a headless cloud VM (no DISPLAY, no WAYLAND_DISPLAY), trying to
+     * open xterm or any other GUI terminal will always fail, regardless of
+     * what $TERM says. Check for a real display before anything else.
+     */
+    const char *display   = getenv("DISPLAY");
+    const char *wayland   = getenv("WAYLAND_DISPLAY");
+    int has_display = (display && strlen(display) > 0) ||
+                      (wayland && strlen(wayland) > 0);
+    if (!has_display) return TERM_HEADLESS;
+
+    /* Has a real display — now check available GUI terminal emulators */
+    if (system("which gnome-terminal > /dev/null 2>&1") == 0) return TERM_GNOME_TERMINAL;
+    if (system("which konsole > /dev/null 2>&1") == 0)        return TERM_KONSOLE;
+    if (system("which xfce4-terminal > /dev/null 2>&1") == 0) return TERM_XFCE_TERMINAL;
+    if (system("which xterm > /dev/null 2>&1") == 0)          return TERM_XTERM;
+    return TERM_HEADLESS;  /* display present but no known terminal found */
+#endif
+    /* macOS — check $TERM_PROGRAM set by the terminal app itself */
     const char *term_prog = getenv("TERM_PROGRAM");
     if (term_prog) {
         if (strstr(term_prog, "iTerm")) return TERM_ITERM2;
@@ -375,13 +400,6 @@ static TermType detect_terminal(void) {
     if (term) {
         if (strstr(term, "xterm")) return TERM_XTERM;
     }
-#if PLATFORM_LINUX
-    /* Check available terminal emulators */
-    if (system("which gnome-terminal > /dev/null 2>&1") == 0) return TERM_GNOME_TERMINAL;
-    if (system("which konsole > /dev/null 2>&1") == 0)        return TERM_KONSOLE;
-    if (system("which xfce4-terminal > /dev/null 2>&1") == 0) return TERM_XFCE_TERMINAL;
-    if (system("which xterm > /dev/null 2>&1") == 0)          return TERM_XTERM;
-#endif
     /* Fallback for macOS */
     return TERM_APPLE_TERMINAL;
 #endif
@@ -431,6 +449,19 @@ static int launch_terminal(const char *label, const char *cmd, TermType ttype) {
      * back-to-back launches don't overwrite each other's script before the
      * terminal emulator has a chance to read it.
      */
+    /*
+     * Headless environment (no display server — e.g. SSH into a cloud VM):
+     * Run the server command directly as a background process via nohup.
+     * stdout/stderr are redirected to /tmp/dfs_server<label>.log so the user
+     * can inspect them if needed. No terminal window is opened.
+     */
+    if (ttype == TERM_HEADLESS) {
+        snprintf(buf, sizeof(buf),
+                 "nohup bash -c '%s' > /tmp/dfs_server_%s.log 2>&1 &",
+                 cmd, label);
+        return (system(buf) == 0) ? 0 : -1;
+    }
+
     char script_path[512];
     if (write_launch_script(script_path, sizeof(script_path), label, cmd) != 0) return -1;
 
@@ -549,8 +580,12 @@ static int  wait_for_servers(int need_s1, int need_s2);
  * correctly labels which server it is waiting for.
  */
 static int recover_one_server(int server_num, int need_s1, int need_s2) {
-    print_info(server_num == 1 ? "Launching Server 1 terminal..."
-                               : "Launching Server 2 terminal...");
+    if (g_ttype == TERM_HEADLESS)
+        print_info(server_num == 1 ? "Starting Server 1 in background..."
+                                   : "Starting Server 2 in background...");
+    else
+        print_info(server_num == 1 ? "Launching Server 1 terminal..."
+                                   : "Launching Server 2 terminal...");
     launch_server_windows(server_num, g_ttype);
     printf("\n");
     print_info(server_num == 1 ? "Waiting for Server 1 to come online...\n"
@@ -696,10 +731,15 @@ static void launch_server_windows(int server_num, TermType ttype) {
     char label[8];
     snprintf(label, sizeof(label), "s%d", server_num);
 
-    if (launch_terminal(label, cmd, ttype) == 0)
-        printf("  Launched Server %d terminal.\n", server_num);
-    else
-        printf("  WARNING: Could not auto-launch Server %d terminal.\n", server_num);
+    if (launch_terminal(label, cmd, ttype) == 0) {
+        if (ttype == TERM_HEADLESS)
+            printf("  Started Server %d in background (log: /tmp/dfs_server_s%d.log).\n",
+                   server_num, server_num);
+        else
+            printf("  Launched Server %d terminal.\n", server_num);
+    } else {
+        printf("  WARNING: Could not auto-launch Server %d.\n", server_num);
+    }
 }
 
 /*
@@ -780,7 +820,7 @@ do_retrieve:
 
     if (status == 0) {
         close(fd);
-        char msg[512]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+        char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
         print_err(msg);
         return;
     }
@@ -797,7 +837,7 @@ do_retrieve:
         write_file(outpath, buf, len);
         free(buf);
 
-        char msg[512];
+        char msg[MAX_PATH_LEN + 64];
         snprintf(msg, sizeof(msg), "File saved: %s  (%u bytes)", outpath, len);
         print_ok(msg);
         return;
@@ -821,7 +861,7 @@ do_retrieve:
         free(buf1); free(buf2);
 
         print_warn("File exists on BOTH servers but copies are DIFFERENT:");
-        char msg[512];
+        char msg[MAX_PATH_LEN + 64];
         snprintf(msg, sizeof(msg), "Server 1 copy saved: %s  (%u bytes)", out1, len1);
         print_ok(msg);
         snprintf(msg, sizeof(msg), "Server 2 copy saved: %s  (%u bytes)", out2, len2);
@@ -876,7 +916,7 @@ do_size:
     print_separator();
 
     if (!s1_found && !s2_found) {
-        char msg[256]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+        char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
         print_err(msg);
         print_separator();
         return;
@@ -1271,7 +1311,7 @@ do_view:
 
     if (status == 0) {
         close(fd);
-        char msg[256]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+        char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
         print_err(msg);
         print_separator();
         return;
@@ -1426,7 +1466,7 @@ do_delete_check:
 
         if (!s1_found && !s2_found) {
             close(fd);
-            char msg[256]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+            char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
             print_err(msg);
             return;
         }
@@ -1661,11 +1701,15 @@ ask_start:
 
     if (s1 && !s2) {
         print_ok("Server 1 is already running.");
-        print_warn("Server 2 is offline — launching Server 2 terminal...");
+        print_warn(ttype == TERM_HEADLESS
+                   ? "Server 2 is offline — starting Server 2 in background..."
+                   : "Server 2 is offline — launching Server 2 terminal...");
         launch_server_windows(2, ttype);
     } else if (!s1 && s2) {
         print_ok("Server 2 is already running.");
-        print_warn("Server 1 is offline — launching Server 1 terminal...");
+        print_warn(ttype == TERM_HEADLESS
+                   ? "Server 1 is offline — starting Server 1 in background..."
+                   : "Server 1 is offline — launching Server 1 terminal...");
         launch_server_windows(1, ttype);
     } else {
         /* Both down — launch both (scripts are uniquely named, no delay needed) */

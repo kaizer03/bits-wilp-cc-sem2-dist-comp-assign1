@@ -1087,7 +1087,7 @@ Defaults: `127.0.0.1 5001`.
 #### Terminal Detection (`detect_terminal` / `TermType`)
 At startup, the client inspects environment variables (`TERM_PROGRAM`, `TERM`, `WSL_DISTRO_NAME`, `WT_SESSION`) and checks for installed terminal binaries to identify the current terminal. The detected type is stored in the global `g_ttype` and used whenever a new server terminal window needs to be launched.
 
-Supported terminals: iTerm2, Apple Terminal, GNOME Terminal, Konsole, XFCE Terminal, xterm, Windows CMD, PowerShell, WSL.
+Supported terminals: iTerm2, Apple Terminal, GNOME Terminal, Konsole, XFCE Terminal, xterm, Windows CMD, PowerShell, WSL, and headless Linux (no display — servers run as `nohup` background processes).
 
 #### Launch Script Generation (`write_launch_script`)
 On macOS/Linux, instead of embedding shell commands directly in `osascript` or terminal command strings (which breaks when the path contains spaces or special characters), the client writes a small temporary executable shell script to `/tmp/dfs_launch_<PID>_s<N>.sh`. The terminal emulator then simply executes this script by its clean path.
@@ -1123,7 +1123,7 @@ Creates the `client_files/` directory (mode `0755`) if it does not already exist
 
 ## Platform Support
 
-| Platform | Status | Terminal launching |
+| Platform | Status | Server launching |
 |---|---|---|
 | macOS (iTerm2) | ✅ Tested | `osascript` + temp script |
 | macOS (Apple Terminal) | ✅ Supported | `osascript` + temp script |
@@ -1131,9 +1131,24 @@ Creates the `client_files/` directory (mode `0755`) if it does not already exist
 | Linux (Konsole) | ✅ Supported | `konsole -e` |
 | Linux (XFCE Terminal) | ✅ Supported | `xfce4-terminal -e` |
 | Linux (xterm fallback) | ✅ Supported | `xterm -e` |
+| **Linux headless / SSH / cloud VM** | ✅ Supported | `nohup` background process |
 | Windows (CMD) | ✅ Supported | `start cmd.exe /k` |
 | Windows (PowerShell) | ✅ Supported | `start powershell.exe -NoExit` |
 | WSL | ✅ Supported | `start wsl.exe -e bash` |
+
+### Headless Linux (SSH / Cloud VM)
+
+When the client detects that neither `DISPLAY` nor `WAYLAND_DISPLAY` is set (i.e. no graphical session is available — typical of an SSH connection into a cloud instance such as AWS EC2, GCP, or any headless server), it automatically switches to **headless mode**:
+
+- Server processes are launched directly as background processes using `nohup`.
+- stdout and stderr for each server are redirected to `/tmp/dfs_server_s1.log` and `/tmp/dfs_server_s2.log`.
+- No terminal window is opened; the client polls for the servers to become available exactly as it does in GUI mode.
+
+To inspect server output in headless mode:
+```bash
+tail -f /tmp/dfs_server_s1.log
+tail -f /tmp/dfs_server_s2.log
+```
 
 On **Windows**, Winsock 2 (`ws2_32.lib`) is used instead of POSIX sockets. ANSI colour codes are enabled via `SetConsoleMode` with `ENABLE_VIRTUAL_TERMINAL_PROCESSING`. The Makefile detects Windows automatically and appends `.exe` to binary names and links `ws2_32`.
 
