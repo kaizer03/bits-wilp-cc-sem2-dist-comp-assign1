@@ -367,6 +367,30 @@ static TermType detect_terminal(void) {
     if (term_prog) return TERM_WINDOWS_POWERSHELL;
     return TERM_WINDOWS_CMD;
 #else
+#if PLATFORM_LINUX
+    /*
+     * Headless detection FIRST — before checking $TERM or $TERM_PROGRAM.
+     *
+     * $TERM (e.g. "xterm-256color") describes the SSH client's terminal
+     * emulation capabilities, NOT whether a local display server is running.
+     * On a headless cloud VM (no DISPLAY, no WAYLAND_DISPLAY), trying to
+     * open xterm or any other GUI terminal will always fail, regardless of
+     * what $TERM says. Check for a real display before anything else.
+     */
+    const char *display   = getenv("DISPLAY");
+    const char *wayland   = getenv("WAYLAND_DISPLAY");
+    int has_display = (display && strlen(display) > 0) ||
+                      (wayland && strlen(wayland) > 0);
+    if (!has_display) return TERM_HEADLESS;
+
+    /* Has a real display — now check available GUI terminal emulators */
+    if (system("which gnome-terminal > /dev/null 2>&1") == 0) return TERM_GNOME_TERMINAL;
+    if (system("which konsole > /dev/null 2>&1") == 0)        return TERM_KONSOLE;
+    if (system("which xfce4-terminal > /dev/null 2>&1") == 0) return TERM_XFCE_TERMINAL;
+    if (system("which xterm > /dev/null 2>&1") == 0)          return TERM_XTERM;
+    return TERM_HEADLESS;  /* display present but no known terminal found */
+#endif
+    /* macOS — check $TERM_PROGRAM set by the terminal app itself */
     const char *term_prog = getenv("TERM_PROGRAM");
     if (term_prog) {
         if (strstr(term_prog, "iTerm")) return TERM_ITERM2;
@@ -376,27 +400,6 @@ static TermType detect_terminal(void) {
     if (term) {
         if (strstr(term, "xterm")) return TERM_XTERM;
     }
-#if PLATFORM_LINUX
-    /*
-     * Headless detection: if neither DISPLAY nor WAYLAND_DISPLAY is set,
-     * there is no graphical environment available (e.g. an SSH session into
-     * a cloud VM). All GUI terminal emulators will fail in this case, so
-     * skip probing for them and return TERM_HEADLESS. Servers will be started
-     * as background processes instead.
-     */
-    const char *display   = getenv("DISPLAY");
-    const char *wayland   = getenv("WAYLAND_DISPLAY");
-    int has_display = (display && strlen(display) > 0) ||
-                      (wayland && strlen(wayland) > 0);
-    if (!has_display) return TERM_HEADLESS;
-
-    /* Has a display — check available terminal emulators */
-    if (system("which gnome-terminal > /dev/null 2>&1") == 0) return TERM_GNOME_TERMINAL;
-    if (system("which konsole > /dev/null 2>&1") == 0)        return TERM_KONSOLE;
-    if (system("which xfce4-terminal > /dev/null 2>&1") == 0) return TERM_XFCE_TERMINAL;
-    if (system("which xterm > /dev/null 2>&1") == 0)          return TERM_XTERM;
-    return TERM_HEADLESS;  /* display present but no known terminal found */
-#endif
     /* Fallback for macOS */
     return TERM_APPLE_TERMINAL;
 #endif
@@ -817,7 +820,7 @@ do_retrieve:
 
     if (status == 0) {
         close(fd);
-        char msg[512]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+        char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
         print_err(msg);
         return;
     }
@@ -834,7 +837,7 @@ do_retrieve:
         write_file(outpath, buf, len);
         free(buf);
 
-        char msg[512];
+        char msg[MAX_PATH_LEN + 64];
         snprintf(msg, sizeof(msg), "File saved: %s  (%u bytes)", outpath, len);
         print_ok(msg);
         return;
@@ -858,7 +861,7 @@ do_retrieve:
         free(buf1); free(buf2);
 
         print_warn("File exists on BOTH servers but copies are DIFFERENT:");
-        char msg[512];
+        char msg[MAX_PATH_LEN + 64];
         snprintf(msg, sizeof(msg), "Server 1 copy saved: %s  (%u bytes)", out1, len1);
         print_ok(msg);
         snprintf(msg, sizeof(msg), "Server 2 copy saved: %s  (%u bytes)", out2, len2);
@@ -913,7 +916,7 @@ do_size:
     print_separator();
 
     if (!s1_found && !s2_found) {
-        char msg[256]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+        char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
         print_err(msg);
         print_separator();
         return;
@@ -1308,7 +1311,7 @@ do_view:
 
     if (status == 0) {
         close(fd);
-        char msg[256]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+        char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
         print_err(msg);
         print_separator();
         return;
@@ -1463,7 +1466,7 @@ do_delete_check:
 
         if (!s1_found && !s2_found) {
             close(fd);
-            char msg[256]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
+            char msg[MAX_PATH_LEN + 64]; snprintf(msg, sizeof(msg), "File '%s' was NOT FOUND on any server.", path);
             print_err(msg);
             return;
         }
