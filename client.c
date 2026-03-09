@@ -469,6 +469,7 @@ static int launch_terminal(const char *label, const char *cmd, TermType ttype) {
 /* ==========================================================
  * UTILITY: Server status check
  * ========================================================== */
+static int server_status_code(int s1, int s2); /* forward declaration */
 
 /*
  * Check both server statuses via OP_PING to SERVER1.
@@ -499,8 +500,19 @@ static int check_server_status(int *out_s1, int *out_s2) {
     *out_s1 = (int)s1_r;
     *out_s2 = (int)s2_r;
 
-    if (*out_s1 && *out_s2) return 3;
-    if (*out_s1 && !*out_s2) return 1;
+    return server_status_code(*out_s1, *out_s2);
+}
+
+/*
+ * Pure-logic helper: map two server up/down booleans to a status code.
+ *   3 = both online
+ *   1 = S1 online, S2 offline (or unknown)
+ *   0 = S1 offline (S2 status unknown)
+ * Extracted as a named function so it can be unit-tested independently.
+ */
+static int server_status_code(int s1, int s2) {
+    if (s1 && s2) return 3;
+    if (s1 && !s2) return 1;
     return 0;
 }
 
@@ -1033,6 +1045,23 @@ typedef struct {
     uint32_t size;
 } FileEntry;
 
+/*
+ * Pure-logic helper: check whether entry[idx] from the source array has an
+ * identical copy (same name AND same size) anywhere in the other array.
+ * Returns 1 if found, 0 otherwise.
+ * Extracted as a named function so it can be unit-tested independently.
+ */
+static int file_is_identical_in_list(const FileEntry *src, int idx,
+                                     const FileEntry *other, int other_count) {
+    for (int k = 0; k < other_count; k++) {
+        if (strcmp(src[idx].name, other[k].name) == 0 &&
+            src[idx].size == other[k].size) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void print_file_list(FileEntry *s1_files, int s1_count,
                              FileEntry *s2_files, int s2_count,
                              uint8_t target) {
@@ -1049,16 +1078,9 @@ static void print_file_list(FileEntry *s1_files, int s1_count,
         } else {
             for (int i = 0; i < s1_count; i++) {
                 /* Check if identical copy exists on s2 */
-                int identical = 0;
-                if (target == TARGET_BOTH) {
-                    for (int j = 0; j < s2_count; j++) {
-                        if (strcmp(s1_files[i].name, s2_files[j].name) == 0 &&
-                            s1_files[i].size == s2_files[j].size) {
-                            identical = 1;
-                            break;
-                        }
-                    }
-                }
+                int identical = (target == TARGET_BOTH)
+                    ? file_is_identical_in_list(s1_files, i, s2_files, s2_count)
+                    : 0;
                 if (g_use_color) printf(COL_WHITE);
                 printf("    %-30s  %6u bytes", s1_files[i].name, s1_files[i].size);
                 if (identical) {
@@ -1081,16 +1103,9 @@ static void print_file_list(FileEntry *s1_files, int s1_count,
             print_info("  (no files)");
         } else {
             for (int j = 0; j < s2_count; j++) {
-                int identical = 0;
-                if (target == TARGET_BOTH) {
-                    for (int i = 0; i < s1_count; i++) {
-                        if (strcmp(s2_files[j].name, s1_files[i].name) == 0 &&
-                            s2_files[j].size == s1_files[i].size) {
-                            identical = 1;
-                            break;
-                        }
-                    }
-                }
+                int identical = (target == TARGET_BOTH)
+                    ? file_is_identical_in_list(s2_files, j, s1_files, s1_count)
+                    : 0;
                 if (g_use_color) printf(COL_WHITE);
                 printf("    %-30s  %6u bytes", s2_files[j].name, s2_files[j].size);
                 if (identical) {

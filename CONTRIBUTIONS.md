@@ -152,167 +152,88 @@ The original problem statement required only a one-shot command-line file retrie
 
 C does not have a built-in testing framework, but there is a well-established ecosystem of unit testing libraries for C projects. For this codebase, **Unity** (by Throw The Switch) is the most appropriate choice — it is a lightweight, single-file C unit testing framework with no external dependencies, making it ideal for embedded and systems C code.
 
-### Why Unity
+### Unit Test Cases
 
-- Single `unity.c` / `unity.h` include — no build system changes beyond adding one file.
-- Works with `gcc` and the existing `Makefile` — no special toolchain required.
-- Produces clear pass/fail output per test with file and line numbers.
-- Supports `TEST_ASSERT_EQUAL_INT`, `TEST_ASSERT_EQUAL_STRING`, `TEST_ASSERT_NULL`, `TEST_ASSERT_NOT_NULL`, and many more assertions.
-- Used in production embedded C projects (NASA, SpaceX supplier chains).
+All test files are located in the `test/` directory and can be run with `make test`.
 
-### How to Add Unity to This Project
+#### `test/test_pathsanitize.c` — Path Sanitisation (`build_fullpath`)
 
-1. Download `unity.c` and `unity.h` from [https://github.com/ThrowTheSwitch/Unity](https://github.com/ThrowTheSwitch/Unity) and place them in a `test/unity/` subdirectory.
-2. Create test files in `test/` (e.g. `test_protocol.c`, `test_pathsanitize.c`).
-3. Add a `make test` target to the `Makefile`.
+- Directory traversal via `..` is rejected
+- Absolute path starting with `/` is rejected
+- A valid filename produces the correctly joined path
+- An empty filename is rejected
 
-### Recommended Test Cases
+#### `test/test_sanitize_name.c` — Client Output Filename Sanitisation (`sanitize_name`)
 
-The following test cases are recommended for implementation. Note that runtime integration testing (all menu paths, all file distribution scenarios, all recovery scenarios) has been completed manually by the team. The tests below cover the pure-logic unit-testable functions.
+- Forward slash `/` in a received filename is replaced with `_`
+- Backslash `\` in a received filename is replaced with `_`
+- A clean filename with no separators is left unchanged
 
-#### `test/test_pathsanitize.c` — Path Sanitisation
+#### `test/test_cancel_token.c` — Escape Token Detection (`is_cancel`)
 
-```c
-#include "unity/unity.h"
-#include "../server1.c"  /* or extract build_fullpath to a shared header */
+- Exact token `!cancel` is detected as a cancel signal
+- A normal filename is not treated as cancel
+- An empty string is not treated as cancel
+- Partial or extended strings that resemble the token are not cancel
 
-void test_traversal_blocked(void) {
-    char out[512];
-    int r = build_fullpath("./server1_files", "../etc/passwd", out, sizeof(out));
-    TEST_ASSERT_EQUAL_INT(-1, r);
-}
+#### `test/test_buffers_equal.c` — File Content Comparison (`buffers_equal`)
 
-void test_absolute_path_blocked(void) {
-    char out[512];
-    int r = build_fullpath("./server1_files", "/etc/passwd", out, sizeof(out));
-    TEST_ASSERT_EQUAL_INT(-1, r);
-}
+- Two buffers with byte-for-byte identical content are equal
+- Two buffers of the same length but different bytes are not equal
+- Two buffers of different lengths are not equal
+- Two zero-length empty buffers are considered equal
 
-void test_normal_filename_passes(void) {
-    char out[512];
-    int r = build_fullpath("./server1_files", "hello.txt", out, sizeof(out));
-    TEST_ASSERT_EQUAL_INT(0, r);
-    TEST_ASSERT_EQUAL_STRING("./server1_files/hello.txt", out);
-}
+#### `test/test_server_status_code.c` — Server Status Code Mapping (`server_status_code`)
 
-void test_empty_filename_blocked(void) {
-    char out[512];
-    int r = build_fullpath("./server1_files", "", out, sizeof(out));
-    TEST_ASSERT_EQUAL_INT(-1, r);
-}
-```
+- Both servers online maps to status code `3`
+- Server 1 online, Server 2 offline maps to status code `1`
+- Server 1 offline with Server 2 reported online maps to `0` (S1 is the gatekeeper; its report is unreachable)
+- Both servers offline maps to status code `0`
 
-#### `test/test_sanitize_name.c` — Client Output Filename Sanitisation
+#### `test/test_file_identical.c` — Identical File Detection Across Servers (`file_is_identical_in_list`)
 
-```c
-#include "unity/unity.h"
+- A file with matching name and size is found as identical
+- A file with matching name but different size is not identical
+- A file with different name but matching size is not identical
+- A file absent from the other list entirely is not identical
+- An empty other list always returns not identical
+- A match on the second entry (not first) in the other list is correctly found
 
-extern void sanitize_name(const char *in, char *out, size_t cap);
+#### `test/test_server_ready.c` — Server Polling Readiness Guard (`wait_for_servers` logic)
 
-void test_slash_replaced(void) {
-    char out[64];
-    sanitize_name("dir/file.txt", out, sizeof(out));
-    TEST_ASSERT_EQUAL_STRING("dir_file.txt", out);
-}
+- A server that is not needed and is offline is considered ready (no-wait)
+- A server that is not needed and is online is considered ready
+- A server that is needed but still offline is not ready (polling continues)
+- A server that is needed and is online is ready (polling terminates)
 
-void test_backslash_replaced(void) {
-    char out[64];
-    sanitize_name("dir\\file.txt", out, sizeof(out));
-    TEST_ASSERT_EQUAL_STRING("dir_file.txt", out);
-}
+#### `test/test_recv_length_guard.c` — Wire Protocol Length Validation (`recv_string` guard)
 
-void test_clean_name_unchanged(void) {
-    char out[64];
-    sanitize_name("hello.txt", out, sizeof(out));
-    TEST_ASSERT_EQUAL_STRING("hello.txt", out);
-}
-```
+- Zero-length frame is rejected
+- A normal filename length within all bounds is accepted
+- A length exactly equal to `MAX_PATH_LEN` is accepted (boundary)
+- A length one over `MAX_PATH_LEN` is rejected
+- A length equal to the buffer capacity is rejected (would overflow null terminator)
+- A length one below the buffer capacity is accepted (largest safe value)
 
-#### `test/test_cancel_token.c` — `!cancel` Detection
+#### `test/test_file_size_guard.c` — File Size Overflow Guard (`read_file_to_buf` guard)
 
-```c
-#include "unity/unity.h"
+- Negative file size (filesystem error) is rejected
+- Zero size (empty file) is accepted
+- A normal file size is accepted
+- A size exactly equal to `UINT32_MAX` is accepted (largest wire-safe value)
+- A size of `UINT32_MAX + 1` is rejected (would truncate on cast to `uint32_t`)
 
-extern int is_cancel(const char *s);
+#### `test/test_target_label.c` — Target-to-Label Enum Mappings (client + server1)
 
-void test_cancel_token_detected(void) {
-    TEST_ASSERT_EQUAL_INT(1, is_cancel("!cancel"));
-}
+- Client command target `0` maps to `"both servers"`
+- Client command target `1` maps to `"Server 1"`
+- Client command target `2` maps to `"Server 2"`
+- Server create/list target `0` maps to `"both servers"`
+- Server create/list target `1` maps to `"SERVER1 only"`
+- Server create/list target `2` maps to `"SERVER2 only"`
+- Delete scope `0` maps to `"both servers"`
+- Delete scope `1` maps to `"SERVER1 only"`
+- Delete scope `2` maps to `"SERVER2 only"`
+- Delete scope out-of-range value maps to `"cancelled"`
 
-void test_normal_filename_not_cancel(void) {
-    TEST_ASSERT_EQUAL_INT(0, is_cancel("a.txt"));
-}
-
-void test_empty_string_not_cancel(void) {
-    TEST_ASSERT_EQUAL_INT(0, is_cancel(""));
-}
-
-void test_partial_token_not_cancel(void) {
-    TEST_ASSERT_EQUAL_INT(0, is_cancel("!cance"));
-    TEST_ASSERT_EQUAL_INT(0, is_cancel("!cancell"));
-}
-```
-
-#### `test/test_buffers_equal.c` — File Content Comparison
-
-```c
-#include "unity/unity.h"
-
-extern int buffers_equal(const uint8_t *a, uint32_t la,
-                         const uint8_t *b, uint32_t lb);
-
-void test_identical_buffers(void) {
-    uint8_t a[] = "hello";
-    uint8_t b[] = "hello";
-    TEST_ASSERT_EQUAL_INT(1, buffers_equal(a, 5, b, 5));
-}
-
-void test_different_content_same_length(void) {
-    uint8_t a[] = "hello";
-    uint8_t b[] = "world";
-    TEST_ASSERT_EQUAL_INT(0, buffers_equal(a, 5, b, 5));
-}
-
-void test_different_lengths(void) {
-    uint8_t a[] = "hello";
-    uint8_t b[] = "hello!";
-    TEST_ASSERT_EQUAL_INT(0, buffers_equal(a, 5, b, 6));
-}
-
-void test_empty_buffers_equal(void) {
-    TEST_ASSERT_EQUAL_INT(1, buffers_equal(NULL, 0, NULL, 0));
-}
-```
-
-### Adding `make test` to the Makefile
-
-```makefile
-TEST_SRCS = test/test_pathsanitize.c test/test_sanitize_name.c \
-            test/test_cancel_token.c test/test_buffers_equal.c \
-            test/unity/unity.c
-
-test: $(TEST_SRCS)
-	gcc -O0 -g -Wall -I test/unity -o bin/run_tests $(TEST_SRCS)
-	./bin/run_tests
-
-.PHONY: test
-```
-
-Run with:
-```bash
-make test
-```
-
-Expected output (all passing):
-```
-test/test_pathsanitize.c:8:test_traversal_blocked:PASS
-test/test_pathsanitize.c:14:test_absolute_path_blocked:PASS
-test/test_pathsanitize.c:20:test_normal_filename_passes:PASS
-test/test_pathsanitize.c:26:test_empty_filename_blocked:PASS
-...
------------------------
-16 Tests  0 Failures  0 Ignored
-OK
-```
-
-> **Note:** Runtime integration testing covering all menu options, all five file distribution scenarios, all three recovery scenarios, and all edge cases has been completed manually by Moulik Patra on macOS (iTerm2). The Unity test suite above is provided as a foundation for automated regression testing of the pure-logic functions and is intended for future adoption.
+> **Note:** Runtime integration testing covering all menu options, all five file distribution scenarios, all three recovery scenarios, and all edge cases has been completed manually by the team. The Unity test suite covers the pure-logic unit-testable functions and is intended for automated regression testing.
